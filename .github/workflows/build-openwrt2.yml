@@ -1,0 +1,131 @@
+name: 构建 OpenWrt24.10
+
+on:
+  workflow_dispatch:  # 手动触发
+
+env:
+  REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-24.10
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@main
+
+    - name: 初始化环境
+      run: |
+        sudo -E apt-get update
+        sudo -E apt-get install -y build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev patch python3 unzip zlib1g-dev lib32gcc-s1 libc6-dev-i386 subversion flex uglifyjs git-core gcc-multilib p7zip p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool autopoint device-tree-compiler g++-multilib
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: 检查并设置默认分支
+      id: set_branch
+      run: |
+        echo "检查 $REPO_URL 的分支情况..."
+        git ls-remote --heads $REPO_URL | grep -E "refs/heads/.*" | sed 's/refs\/heads\///g' > branches.txt
+        echo "可用分支如下："
+        cat branches.txt
+        DEFAULT_BRANCH=$(git ls-remote --symref $REPO_URL HEAD | grep -oP '(?<=ref: refs/heads/)[^\t]+')
+        if [ -z "$DEFAULT_BRANCH" ]; then
+          echo "无法确定默认分支，从可用分支中选择第一个..."
+          DEFAULT_BRANCH=$(head -n 1 branches.txt)
+        fi
+        DEFAULT_BRANCH="${DEFAULT_BRANCH%%[[:space:]]*}"  # 移除尾随空白
+        if [[ $DEFAULT_BRANCH =~ [[:space:]] ]]; then
+          echo "错误：分支名称包含无效字符。"
+          exit 1
+        fi
+        echo "使用分支: $DEFAULT_BRANCH"
+        echo "REPO_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
+
+    - name: 克隆源代码
+      run: |
+        echo "克隆仓库，使用分支: $REPO_BRANCH"
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+
+    - name: 验证克隆的分支
+      run: |
+        cd openwrt
+        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+        if [ "$CURRENT_BRANCH" != "$REPO_BRANCH" ]; then
+          echo "错误：克隆的仓库分支不正确，预期 $REPO_BRANCH，实际 $CURRENT_BRANCH。"
+          exit 1
+        fi
+        echo "成功克隆并检查出分支 $REPO_BRANCH。"
+
+    - name: 加载自定义源
+      run: |
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: 更新并安装 Feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: 加载自定义配置
+      run: |
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+        make defconfig
+
+    - name: 缓存依赖包
+      uses: actions/cache@v3
+      with:
+        path: openwrt/dl
+        key: dl-cache-${{ hashFiles('openwrt/feeds.conf.default', 'openwrt/.config') }}
+
+    - name: 下载依赖包
+      run: |
+        cd openwrt
+        make download -j16
+        find dl -size -1024c -exec rm -f {} \;  # 清理小文件
+
+    - name: 编译固件
+      run: |
+        cd openwrt
+        echo "使用 $(nproc) 个线程编译"
+        make -j$(nproc) V=s || make -j1 V=s
+
+    - name: 整理固件
+      id: organize
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages *.buildinfo *.manifest *kernel.bin *.itb *.json
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+
+    - name: 上传固件
+      uses: actions/upload-artifact@main
+      with:
+        name: OpenWrt_firmware_cmcc_rax3000m_${{ github.run_id }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: 生成发布标签
+      id: tag
+      run: |
+        echo "RELEASE_TAG=$(date +"%Y.%m.%d-%H%M-immortalwrt-$REPO_BRANCH-cmcc_rax3000m")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "cmcc_rax3000m-nand-$REPO_BRANCH 固件" >> release.txt
+        echo "后台: 192.168.2.1" >> release.txt
+        echo "用户名: root" >> release.txt
+        echo "密码: 无" >> release.txt
+        echo "源码: $REPO_URL/tree/$REPO_BRANCH" >> release.txt
+
+    - name: 发布固件
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
