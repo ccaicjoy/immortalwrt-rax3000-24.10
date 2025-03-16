@@ -1,4 +1,4 @@
-name: 构建 OpenWrt24.10
+name:  build-openwrt24.10
 
 on:
   workflow_dispatch:  # 手动触发
