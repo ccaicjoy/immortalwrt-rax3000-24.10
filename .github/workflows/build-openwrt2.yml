@@ -121,11 +121,9 @@ jobs:
         echo "密码: 无" >> release.txt
         echo "源码: $REPO_URL/tree/$REPO_BRANCH" >> release.txt
 
-    - name: 发布固件
-      uses: softprops/action-gh-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+   - name: 发布固件
+  uses: softprops/action-gh-release@v1
+  with:
+    tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+    body_path: release.txt
+    files: ${{ env.FIRMWARE }}/*
