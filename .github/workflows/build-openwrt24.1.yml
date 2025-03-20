@@ -3,7 +3,7 @@ name: ImmortalWrt-Build-CMCC-RAX3000M
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'  # 每日自动构建
+    - cron: '0 0 * * *'  # 每日构建
 
 env:
   REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-24.10
@@ -13,16 +13,16 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180  # 3小时超时
+    timeout-minutes: 180  # 3小时
 
     steps:
-    - name: 检出仓库
+    - name: Checkout Repository
       uses: actions/checkout@v4
       with:
         path: scripts
         fetch-depth: 0
 
-    - name: 确定构建分支
+    - name: Determine Build Branch
       id: get_branch
       run: |
         DEFAULT_BRANCH=$(git ls-remote --symref "$REPO_URL" HEAD | awk -F'[ \t/]+' '/^ref:/ {print $3}')
@@ -32,70 +32,78 @@ jobs:
         echo "branch=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
         echo "REPO_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
 
-    - name: 准备编译环境
+    - name: Prepare Build Environment
       run: |
         sudo apt-get update
         sudo apt-get install -y software-properties-common
         sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
         sudo apt-get full-upgrade -y
         
-        # 基础编译工具
+        # 安装必要的构建工具
         sudo apt-get install -y build-essential clang flex bison ninja-build \
         gcc-multilib g++-multilib autoconf automake ccache cmake curl dpkg-dev \
         libelf-dev libffi-dev libfl-dev libssl-dev libtool make patchelf pkg-config \
         python3 python3-pip python3-setuptools python3-venv zlib1g-dev git rsync
         
-        # 特殊依赖
+        # 安装特定依赖
         sudo apt-get install -y subversion gperf gettext texinfo help2man ncurses-dev \
         libreadline-dev libjpeg-dev libgmp3-dev libmpc-dev libxml2-dev u-boot-tools
         
-        # 初始化Python环境
+        # 初始化 Python 环境
         python3 -m pip install --upgrade pip
         pip3 install wheel
 
-    - name: 克隆源码
+    - name: Clone Source Code
       run: |
         git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt --depth=1
         cd openwrt
         git fetch --unshallow --tags
-        echo "源码版本: $(git describe --tags || git rev-parse --short HEAD)" >> ../version.info
+        echo "Source Version: $(git describe --tags || git rev-parse --short HEAD)" >> ../version.info
 
-    - name: 应用自定义配置
+    - name: Apply Custom Configuration
       run: |
         cd openwrt
         
-        # 第一部分自定义脚本
+        # 如果存在 diy-part1.sh，则应用
         if [ -f "../scripts/diy-part1.sh" ]; then
           chmod +x "../scripts/diy-part1.sh"
           ../scripts/diy-part1.sh
         else
-          echo "::warning::未找到 diy-part1.sh 脚本"
+          echo "::warning::diy-part1.sh not found"
         fi
 
-        # 更新Feeds并重试机制
+        # 更新并安装 feeds，支持重试
         for i in {1..3}; do
           ./scripts/feeds update -a && break || sleep $((i*30))
         done
         ./scripts/feeds install -a --force
 
-        # 应用配置文件
+        # 使用 RAX3000M 的特定配置
         if [ -f "../scripts/.config" ]; then
           cp "../scripts/.config" .
         else
-          cp defconfig/cp -f defconfig/mt7981-ax3000.config .config
-          echo "::notice::使用默认配置文件"
+          cp -f defconfig/mt7981-ax3000.config .config
+          echo "::notice::Using default config for RAX3000M"
         fi
 
-        # 第二部分自定义脚本
+        # 如果存在 diy-part2.sh，则应用
         if [ -f "../scripts/diy-part2.sh" ]; then
           chmod +x "../scripts/diy-part2.sh"
           ../scripts/diy-part2.sh
         fi
         
-        make defconfig
+        # 禁用不支持的软件包
+        sed -i 's/CONFIG_PACKAGE_usbgadget=y/CONFIG_PACKAGE_usbgadget=n/g' .config
+        sed -i 's/CONFIG_PACKAGE_dae=y/CONFIG_PACKAGE_dae=n/g' .config
+        sed -i 's/CONFIG_PACKAGE_daed=y/CONFIG_PACKAGE_daed=n/g' .config
         make oldconfig
 
-    - name: 配置缓存
+    - name: Verify Configuration
+      run: |
+        cd openwrt
+        cat .config
+
+    - name: Configure Caching
       uses: actions/cache@v4
       with:
         path: |
@@ -106,7 +114,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-${{ hashFiles('openwrt/.config', 'openwrt/feeds.conf.default') }}-
 
-    - name: 下载依赖
+    - name: Download Dependencies
       run: |
         cd openwrt
         make -j$(nproc) download || make -j1 download
@@ -115,7 +123,7 @@ jobs:
         find dl -type f -size -2k -name "*.zip" -exec rm -fv {} \;
         find dl -type f -size -2k -name "*.gz" -exec rm -fv {} \;
 
-    - name: 编译固件
+    - name: Build Firmware
       run: |
         cd openwrt
         ulimit -n 5120
@@ -126,29 +134,29 @@ jobs:
         MAX_JOBS=$(($(nproc) * 2))
         make -j$MAX_JOBS || make -j2 || make -j1 V=s
         
-        # 生成sha256校验
+        # 生成 sha256 校验和
         cd bin/targets/*/*
         sha256sum -b *.bin > sha256sum.txt
 
-    - name: 归档构建成果
+    - name: Archive Build Artifacts
       run: |
         cd openwrt/bin/targets/*/*
         FIRMWARE_DIR=$(pwd)
         echo "FIRMWARE_DIR=$FIRMWARE_DIR" >> $GITHUB_ENV
         
         # 创建构建信息
-        echo "设备型号: $TARGET_DEVICE" > build-info.md
-        echo "构建时间: $(date +"%Y-%m-%d %H:%M:%S %Z")" >> build-info.md
-        echo "源码分支: $REPO_BRANCH" >> build-info.md
+        echo "Device: $TARGET_DEVICE" > build-info.md
+        echo "Build Time: $(date +"%Y-%m-%d %H:%M:%S %Z")" >> build-info.md
+        echo "Branch: $REPO_BRANCH" >> build-info.md
         echo "Git Commit: $(git -C ../../../../ rev-parse --short HEAD)" >> build-info.md
-        echo "构建系统: Ubuntu 22.04" >> build-info.md
-        echo "编译工具链: $(gcc --version | head -n1)" >> build-info.md
+        echo "Build System: Ubuntu 22.04" >> build-info.md
+        echo "Toolchain: $(gcc --version | head -n1)" >> build-info.md
 
-    - name: 发布固件
+    - name: Release Firmware
       uses: softprops/action-gh-release@v2
       with:
         tag_name: nightly-${{ env.TARGET_DEVICE }}-$(date +%Y%m%d)
-        name: "${{ env.TARGET_DEVICE }} 每日构建"
+        name: "${{ env.TARGET_DEVICE }} Daily Build"
         body_path: build-info.md
         files: |
           ${{ env.FIRMWARE_DIR }}/*.bin
@@ -159,7 +167,7 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: 清理工作空间
+    - name: Cleanup Workspace
       if: always()
       run: |
         df -h
