@@ -88,7 +88,7 @@ jobs:
           mv $CONFIG_FILE openwrt/.config
         else
           echo "警告：配置文件 $CONFIG_FILE 不存在，将使用默认配置。"
-          cp -f defconfig/mt7981-ax3000-gsw-usboffload.config openwrt/.config
+          cp -f defconfig/mt7981-ax3000.config openwrt/.config
         fi
         if [ ! -f $DIY_P2_SH ]; then
           echo "错误：自定义脚本 $DIY_P2_SH 不存在。"
