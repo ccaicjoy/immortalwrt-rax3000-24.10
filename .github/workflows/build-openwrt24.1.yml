@@ -16,7 +16,7 @@ jobs:
 
     steps:
     - name: 检出代码
-      uses: actions/checkout@v4  # 使用具体版本以确保稳定性
+      uses: actions/checkout@v4
 
     - name: 初始化环境
       run: |
@@ -36,7 +36,7 @@ jobs:
           echo "无法确定默认分支，从可用分支中选择第一个..."
           DEFAULT_BRANCH=$(head -n 1 branches.txt)
         fi
-        DEFAULT_BRANCH="${DEFAULT_BRANCH%%[[:space:]]*}"  # 移除尾随空白
+        DEFAULT_BRANCH="${DEFAULT_BRANCH%%[[:space:]]*}"
         if [[ $DEFAULT_BRANCH =~ [[:space:]] ]]; then
           echo "错误：分支名称包含无效字符。"
           exit 1
@@ -77,10 +77,10 @@ jobs:
 
     - name: 加载自定义配置
       run: |
-        if [ ! -f $CONFIG_FILE ]; then
-          echo "警告：配置文件 $CONFIG_FILE 不存在，将使用默认配置。"
-        else
+        if [ -f $CONFIG_FILE ]; then
           mv $CONFIG_FILE openwrt/.config
+        else
+          echo "警告：配置文件 $CONFIG_FILE 不存在，将使用默认配置。"
         fi
         if [ ! -f $DIY_P2_SH ]; then
           echo "错误：自定义脚本 $DIY_P2_SH 不存在。"
@@ -89,10 +89,12 @@ jobs:
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
-        make defconfig
+        if [ ! -f .config ]; then
+          make defconfig
+        fi
 
     - name: 缓存依赖包
-      uses: actions/cache@v4  # 使用具体版本以提高稳定性
+      uses: actions/cache@v4
       with:
         path: openwrt/dl
         key: dl-cache-${{ hashFiles('openwrt/feeds.conf.default', 'openwrt/.config') }}
@@ -100,14 +102,14 @@ jobs:
     - name: 下载依赖包
       run: |
         cd openwrt
-        make download -j$(nproc)  # 动态调整线程数以优化性能
-        find dl -size -1024c -exec rm -f {} \;  # 清理小于 1KB 的文件
+        make download -j$(nproc)
+        find dl -size -1024c -exec rm -f {} \;
 
     - name: 编译固件
       run: |
         cd openwrt
         echo "使用 $(nproc) 个线程编译"
-        make -j$(nproc) V=s || make -j1 V=s  # 先尝试多线程编译，失败时单线程重试
+        make -j$(nproc) V=s || make -j1 V=s
 
     - name: 整理固件
       id: organize
@@ -117,7 +119,7 @@ jobs:
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
 
     - name: 上传固件
-      uses: actions/upload-artifact@v4  # 使用具体版本以确保一致性
+      uses: actions/upload-artifact@v4
       with:
         name: OpenWrt_firmware_cmcc_rax3000m_${{ github.run_id }}
         path: ${{ env.FIRMWARE }}
@@ -130,16 +132,16 @@ jobs:
         echo "cmcc_rax3000m-nand-$REPO_BRANCH 固件" >> release.txt
         echo "后台: 192.168.2.1" >> release.txt
         echo "用户名: root" >> release.txt
-        echo "密码: 请设置密码" >> release.txt  # 提醒用户设置密码以提高安全性
+        echo "密码: 请设置密码" >> release.txt
         echo "源码: $REPO_URL/tree/$REPO_BRANCH" >> release.txt
 
-        - name: 上传固件到发布
+    - name: 上传固件到发布
       uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+      if: steps.tag.outcome == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
+        tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
@@ -151,7 +153,7 @@ jobs:
 
     - name: 删除旧的发布
       uses: dev-drprasad/delete-older-releases@v0.1.0
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: success() && !cancelled()
       with:
         keep_latest: 6
         delete_tags: false
