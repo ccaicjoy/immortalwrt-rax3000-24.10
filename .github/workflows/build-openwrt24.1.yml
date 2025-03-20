@@ -1,176 +1,171 @@
-name: ImmortalWrt-Build-CMCC-RAX3000M
+#
+# https://github.com/P3TERX/Actions-OpenWrt
+#
+# File: .github/workflows/openwrt-bulder.yml
+# Description: Build OpenWrt using GitHub Actions
+#
+# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
+
+name: Build immortalwrt24.10 360T7 Latest Passwall
 
 on:
+  repository_dispatch:
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * *'  # 每日构建
 
 env:
   REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-24.10
-  TARGET_DEVICE: cmcc_rax3000m
-  TIMEZONE: Asia/Shanghai
+  REPO_BRANCH: 2410
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: 2410-360t7-passwall.config
+  DIY_P1_SH: 2410-diy-part1-pw.sh
+  DIY_P2_SH: 2410-diy-part2-6-1-pw.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180  # 3小时
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update feeds
+      run: |
+         cd openwrt
+         ./scripts/feeds update -a && rm -rf feeds/luci/applications/luci-app-mosdns
+         rm -rf feeds/packages/net/{alist,adguardhome,mosdns,xray*,v2ray*,v2ray*,sing*,smartdns}
+         rm -rf feeds/packages/utils/v2dat
+         rm -rf feeds/packages/lang/golang
+         git clone https://github.com/kenzok8/golang feeds/packages/lang/golang
+
+
+    - name: Install feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds install -a 
+        
+         
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        cat $GITHUB_ENV
+
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
-        path: scripts
-        fetch-depth: 0
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
 
-    - name: Determine Build Branch
-      id: get_branch
-      run: |
-        DEFAULT_BRANCH=$(git ls-remote --symref "$REPO_URL" HEAD | awk -F'[ \t/]+' '/^ref:/ {print $3}')
-        if [ -z "$DEFAULT_BRANCH" ]; then
-          DEFAULT_BRANCH="master"
-        fi
-        echo "branch=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
-        echo "REPO_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
-
-    - name: Prepare Build Environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y software-properties-common
-        sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-        sudo apt-get full-upgrade -y
-        
-        # 安装必要的构建工具
-        sudo apt-get install -y build-essential clang flex bison ninja-build \
-        gcc-multilib g++-multilib autoconf automake ccache cmake curl dpkg-dev \
-        libelf-dev libffi-dev libfl-dev libssl-dev libtool make patchelf pkg-config \
-        python3 python3-pip python3-setuptools python3-venv zlib1g-dev git rsync
-        
-        # 安装特定依赖
-        sudo apt-get install -y subversion gperf gettext texinfo help2man ncurses-dev \
-        libreadline-dev libjpeg-dev libgmp3-dev libmpc-dev libxml2-dev u-boot-tools
-        
-        # 初始化 Python 环境
-        python3 -m pip install --upgrade pip
-        pip3 install wheel
-
-    - name: Clone Source Code
-      run: |
-        git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt --depth=1
-        cd openwrt
-        git fetch --unshallow --tags
-        echo "Source Version: $(git describe --tags || git rev-parse --short HEAD)" >> ../version.info
-
-    - name: Apply Custom Configuration
-      run: |
-        cd openwrt
-        
-        # 如果存在 diy-part1.sh，则应用
-        if [ -f "../scripts/diy-part1.sh" ]; then
-          chmod +x "../scripts/diy-part1.sh"
-          ../scripts/diy-part1.sh
-        else
-          echo "::warning::diy-part1.sh not found"
-        fi
-
-        # 更新并安装 feeds，支持重试
-        for i in {1..3}; do
-          ./scripts/feeds update -a && break || sleep $((i*30))
-        done
-        ./scripts/feeds install -a --force
-
-        # 使用 RAX3000M 的特定配置
-        if [ -f "../scripts/.config" ]; then
-          cp "../scripts/.config" .
-        else
-          cp -f defconfig/mt7981-ax3000.config .config
-          echo "::notice::Using default config for RAX3000M"
-        fi
-
-        # 如果存在 diy-part2.sh，则应用
-        if [ -f "../scripts/diy-part2.sh" ]; then
-          chmod +x "../scripts/diy-part2.sh"
-          ../scripts/diy-part2.sh
-        fi
-        
-        # 禁用不支持的软件包
-        sed -i 's/CONFIG_PACKAGE_usbgadget=y/CONFIG_PACKAGE_usbgadget=n/g' .config
-        sed -i 's/CONFIG_PACKAGE_dae=y/CONFIG_PACKAGE_dae=n/g' .config
-        sed -i 's/CONFIG_PACKAGE_daed=y/CONFIG_PACKAGE_daed=n/g' .config
-        make oldconfig
-
-    - name: Verify Configuration
-      run: |
-        cd openwrt
-        cat .config
-
-    - name: Configure Caching
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/dl
-          openwrt/ccache
-          openwrt/staging_dir
-        key: ${{ runner.os }}-${{ hashFiles('openwrt/.config', 'openwrt/feeds.conf.default') }}-${{ github.run_id }}
-        restore-keys: |
-          ${{ runner.os }}-${{ hashFiles('openwrt/.config', 'openwrt/feeds.conf.default') }}-
-
-    - name: Download Dependencies
-      run: |
-        cd openwrt
-        make -j$(nproc) download || make -j1 download
-        
-        # 清理无效文件
-        find dl -type f -size -2k -name "*.zip" -exec rm -fv {} \;
-        find dl -type f -size -2k -name "*.gz" -exec rm -fv {} \;
-
-    - name: Build Firmware
-      run: |
-        cd openwrt
-        ulimit -n 5120
-        export CCACHE_DIR="$PWD/ccache"
-        export CCACHE_BASEDIR="$PWD"
-        
-        # 动态线程管理
-        MAX_JOBS=$(($(nproc) * 2))
-        make -j$MAX_JOBS || make -j2 || make -j1 V=s
-        
-        # 生成 sha256 校验和
-        cd bin/targets/*/*
-        sha256sum -b *.bin > sha256sum.txt
-
-    - name: Archive Build Artifacts
+    - name: Organize files
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
-        FIRMWARE_DIR=$(pwd)
-        echo "FIRMWARE_DIR=$FIRMWARE_DIR" >> $GITHUB_ENV
-        
-        # 创建构建信息
-        echo "Device: $TARGET_DEVICE" > build-info.md
-        echo "Build Time: $(date +"%Y-%m-%d %H:%M:%S %Z")" >> build-info.md
-        echo "Branch: $REPO_BRANCH" >> build-info.md
-        echo "Git Commit: $(git -C ../../../../ rev-parse --short HEAD)" >> build-info.md
-        echo "Build System: Ubuntu 22.04" >> build-info.md
-        echo "Toolchain: $(gcc --version | head -n1)" >> build-info.md
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: Release Firmware
-      uses: softprops/action-gh-release@v2
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        tag_name: nightly-${{ env.TARGET_DEVICE }}-$(date +%Y%m%d)
-        name: "${{ env.TARGET_DEVICE }} Daily Build"
-        body_path: build-info.md
-        files: |
-          ${{ env.FIRMWARE_DIR }}/*.bin
-          ${{ env.FIRMWARE_DIR }}/*.img
-          ${{ env.FIRMWARE_DIR }}/sha256sum.txt
-        draft: false
-        prerelease: true
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch 2410-release.txt
+        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v2
+      if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: 2410-release.txt
+        files: ${{ env.FIRMWARE }}/*
 
-    - name: Cleanup Workspace
-      if: always()
-      run: |
-        df -h
-        sudo rm -rf openwrt/{build_dir,staging_dir,tmp}
-        sudo rm -rf /usr/local/share/boost /usr/share/swig*
-        sudo apt-get clean
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        retain_days: 0
+        keep_minimum_runs: 2
+
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@master
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 5
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
