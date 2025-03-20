@@ -1,119 +1,168 @@
-name: build-openwrt24.10
+name: ImmortalWrt-Build-CMCC-RAX3000M
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'  # 每日自动构建
 
 env:
   REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-24.10
-  CONFIG_FILE: .config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
-  TZ: Asia/Shanghai
+  TARGET_DEVICE: cmcc_rax3000m
+  TIMEZONE: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120  # 增加超时时间
+    timeout-minutes: 180  # 3小时超时
 
     steps:
-    - name: 检出代码
+    - name: 检出仓库
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # 获取完整提交历史
+        path: scripts
+        fetch-depth: 0
 
-    - name: 初始化环境
-      run: |
-        sudo apt update -y
-        sudo apt full-upgrade -y
-        sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-        bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
-        g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
-        libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
-        libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
-        ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
-        python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
-        upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
-
-
-    - name: 获取默认分支
+    - name: 确定构建分支
       id: get_branch
       run: |
-        # 使用更可靠的获取方式
-        DEFAULT_BRANCH=$(git ls-remote --symref "$REPO_URL" HEAD | awk '/^ref:/ {sub(/refs\/heads\//, "", $2); print $2}')
+        DEFAULT_BRANCH=$(git ls-remote --symref "$REPO_URL" HEAD | awk -F'[ \t/]+' '/^ref:/ {print $3}')
         if [ -z "$DEFAULT_BRANCH" ]; then
-          DEFAULT_BRANCH="master"  # 设置默认值
+          DEFAULT_BRANCH="master"
         fi
-        echo "branch=${DEFAULT_BRANCH}" >> $GITHUB_OUTPUT
+        echo "branch=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
+        echo "REPO_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
 
-    - name: 克隆源代码
+    - name: 准备编译环境
       run: |
-        git clone "$REPO_URL" -b "${{ steps.get_branch.outputs.branch }}" openwrt --depth=1
-        cd openwrt
-        git fetch --unshallow  # 转换为完整仓库
+        sudo apt-get update
+        sudo apt-get install -y software-properties-common
+        sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+        sudo apt-get full-upgrade -y
+        
+        # 基础编译工具
+        sudo apt-get install -y build-essential clang flex bison ninja-build \
+        gcc-multilib g++-multilib autoconf automake ccache cmake curl dpkg-dev \
+        libelf-dev libffi-dev libfl-dev libssl-dev libtool make patchelf pkg-config \
+        python3 python3-pip python3-setuptools python3-venv zlib1g-dev git rsync
+        
+        # 特殊依赖
+        sudo apt-get install -y subversion gperf gettext texinfo help2man ncurses-dev \
+        libreadline-dev libjpeg-dev libgmp3-dev libmpc-dev libxml2-dev u-boot-tools
+        
+        # 初始化Python环境
+        python3 -m pip install --upgrade pip
+        pip3 install wheel
 
-    - name: 加载自定义源
+    - name: 克隆源码
       run: |
-        [ -f "$DIY_P1_SH" ] || { echo "错误：缺少 $DIY_P1_SH"; exit 1; }
-        chmod +x "$DIY_P1_SH"
+        git clone "$REPO_URL" -b "$REPO_BRANCH" openwrt --depth=1
         cd openwrt
-        ../"$DIY_P1_SH"
+        git fetch --unshallow --tags
+        echo "源码版本: $(git describe --tags || git rev-parse --short HEAD)" >> ../version.info
 
-    - name: 更新 Feeds
+    - name: 应用自定义配置
       run: |
         cd openwrt
-        for i in {1..3}; do  # 添加重试机制
-          ./scripts/feeds update -a && break || sleep 30
+        
+        # 第一部分自定义脚本
+        if [ -f "../scripts/diy-part1.sh" ]; then
+          chmod +x "../scripts/diy-part1.sh"
+          ../scripts/diy-part1.sh
+        else
+          echo "::warning::未找到 diy-part1.sh 脚本"
+        fi
+
+        # 更新Feeds并重试机制
+        for i in {1..3}; do
+          ./scripts/feeds update -a && break || sleep $((i*30))
         done
         ./scripts/feeds install -a --force
 
-    - name: 应用配置
-      run: |
-        cd openwrt
-        [ -f "../$CONFIG_FILE" ] && cp "../$CONFIG_FILE" .config || \
-        cp defconfig/mt7981-ax3000-gsw-usboffload.config .config
-        [ -f "../$DIY_P2_SH}" ] || { echo "错误：缺少 $DIY_P2_SH"; exit 1; }
-        chmod +x "../$DIY_P2_SH"
-        ../"$DIY_P2_SH"
-        make defconfig
+        # 应用配置文件
+        if [ -f "../scripts/.config" ]; then
+          cp "../scripts/.config" .
+        else
+          cp defconfig/cp -f defconfig/mt7981-ax3000.config .config
+          echo "::notice::使用默认配置文件"
+        fi
 
-    - name: 缓存优化
+        # 第二部分自定义脚本
+        if [ -f "../scripts/diy-part2.sh" ]; then
+          chmod +x "../scripts/diy-part2.sh"
+          ../scripts/diy-part2.sh
+        fi
+        
+        make defconfig
+        make oldconfig
+
+    - name: 配置缓存
       uses: actions/cache@v4
       with:
         path: |
           openwrt/dl
           openwrt/ccache
-        key: ${{ runner.os }}-${{ hashFiles('openwrt/feeds.conf.default', 'openwrt/.config', '**/Makefile') }}
+          openwrt/staging_dir
+        key: ${{ runner.os }}-${{ hashFiles('openwrt/.config', 'openwrt/feeds.conf.default') }}-${{ github.run_id }}
+        restore-keys: |
+          ${{ runner.os }}-${{ hashFiles('openwrt/.config', 'openwrt/feeds.conf.default') }}-
 
     - name: 下载依赖
       run: |
         cd openwrt
         make -j$(nproc) download || make -j1 download
-        # 移除可能损坏的文件
-        find dl -size -1024c -name "*.zip" -exec rm -f {} \;
+        
+        # 清理无效文件
+        find dl -type f -size -2k -name "*.zip" -exec rm -fv {} \;
+        find dl -type f -size -2k -name "*.gz" -exec rm -fv {} \;
 
     - name: 编译固件
       run: |
         cd openwrt
-        echo "开始编译..."
-        make -j$(($(nproc)+1)) || make -j2 V=s  # 动态调整线程数
+        ulimit -n 5120
+        export CCACHE_DIR="$PWD/ccache"
+        export CCACHE_BASEDIR="$PWD"
+        
+        # 动态线程管理
+        MAX_JOBS=$(($(nproc) * 2))
+        make -j$MAX_JOBS || make -j2 || make -j1 V=s
+        
+        # 生成sha256校验
+        cd bin/targets/*/*
+        sha256sum -b *.bin > sha256sum.txt
 
-    - name: 整理固件
+    - name: 归档构建成果
       run: |
         cd openwrt/bin/targets/*/*
-        FIRMWARE_PATH=$(pwd)
-        echo "FIRMWARE_PATH=${FIRMWARE_PATH}" >> $GITHUB_ENV
-        # 创建版本信息
-        echo "Built at: $(date +"%Y-%m-%d %H:%M:%S")" > build-info.txt
-        echo "Git Revision: $(git rev-parse HEAD)" >> build-info.txt
+        FIRMWARE_DIR=$(pwd)
+        echo "FIRMWARE_DIR=$FIRMWARE_DIR" >> $GITHUB_ENV
+        
+        # 创建构建信息
+        echo "设备型号: $TARGET_DEVICE" > build-info.md
+        echo "构建时间: $(date +"%Y-%m-%d %H:%M:%S %Z")" >> build-info.md
+        echo "源码分支: $REPO_BRANCH" >> build-info.md
+        echo "Git Commit: $(git -C ../../../../ rev-parse --short HEAD)" >> build-info.md
+        echo "构建系统: Ubuntu 22.04" >> build-info.md
+        echo "编译工具链: $(gcc --version | head -n1)" >> build-info.md
 
-    - name: 创建发布
-      uses: softprops/action-gh-release@v1
+    - name: 发布固件
+      uses: softprops/action-gh-release@v2
       with:
-        tag_name: nightly-${{ steps.get_branch.outputs.branch }}-$(date +%Y%m%d)
-        body_path: build-info.txt
-        files: ${{ env.FIRMWARE_PATH }}/*
+        tag_name: nightly-${{ env.TARGET_DEVICE }}-$(date +%Y%m%d)
+        name: "${{ env.TARGET_DEVICE }} 每日构建"
+        body_path: build-info.md
+        files: |
+          ${{ env.FIRMWARE_DIR }}/*.bin
+          ${{ env.FIRMWARE_DIR }}/*.img
+          ${{ env.FIRMWARE_DIR }}/sha256sum.txt
         draft: false
+        prerelease: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    # 移除旧的删除步骤，改用官方清理方式
+    - name: 清理工作空间
+      if: always()
+      run: |
+        df -h
+        sudo rm -rf openwrt/{build_dir,staging_dir,tmp}
+        sudo rm -rf /usr/local/share/boost /usr/share/swig*
+        sudo apt-get clean
