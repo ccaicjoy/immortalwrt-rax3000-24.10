@@ -1,19 +1,106 @@
-name: OpenWrt Builder #你的工作流名称（yml文件名称）
-
+name: OpenWrt Builder
 
 on:
-repository_dispatch:
-workflow_dispatch:
-
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      manual_trigger:
+        description: '手动触发构建'
+        required: false
+        default: 'true'
 
 env:
-REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-24.10 #源码仓库地址
-REPO_BRANCH: 2410 #源码分支
-FEEDS_CONF: feeds.conf.default
-CONFIG_FILE: .config #你的配置文件名
-DIY_P1_SH: diy-part1.sh
-DIY_P2_SH: diy-part2.sh
-UPLOAD_BIN_DIR: false #上传 bin 目录。即包含所有 ipk 文件和固件的目录。默认false
-UPLOAD_FIRMWARE: true #上传固件目录。默认true（建议打开，不然编译好没有固件）
-UPLOAD_RELEASE: true #上传固件到 releases 。默认false
-TZ: Asia/Shanghai
+  REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-24.10
+  REPO_BRANCH: 2410
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 检查代码仓库
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      # 设置时区
+      - name: Set Timezone
+        run: sudo timedatectl set-timezone "$TZ"
+      
+      # 初始化构建环境
+      - name: Initialize Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib gettext git libncurses5-dev libssl-dev \
+            python3-distutils zlib1g-dev unzip
+          
+      # 克隆 OpenWrt 源码
+      - name: Clone OpenWrt Source
+        run: git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
+      
+      # 加载自定义配置
+      - name: Load Custom Configuration
+        working-directory: ./openwrt
+        run: |
+          [ -f "../$FEEDS_CONF" ] && cp "../$FEEDS_CONF" .
+          [ -f "../$CONFIG_FILE" ] && cp "../$CONFIG_FILE" .
+          [ -f "../$DIY_P1_SH" ] && chmod +x "../$DIY_P1_SH" && "../$DIY_P1_SH"
+          
+      # 更新和安装 feeds
+      - name: Update and Install Feeds
+        working-directory: ./openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+      # 执行第二部分自定义脚本
+      - name: Execute DIY Part 2
+        working-directory: ./openwrt
+        run: |
+          [ -f "../$DIY_P2_SH" ] && chmod +x "../$DIY_P2_SH" && "../$DIY_P2_SH"
+          
+      # 编译固件
+      - name: Build Firmware
+        working-directory: ./openwrt
+        run: |
+          make defconfig
+          make -j$(nproc) || make -j1 V=s
+          
+      # 打包固件
+      - name: Package Artifacts
+        if: env.UPLOAD_FIRMWARE == 'true' || env.UPLOAD_BIN_DIR == 'true'
+        run: |
+          mkdir -p artifacts
+          if [ "$UPLOAD_FIRMWARE" = "true" ]; then
+            find openwrt/bin/targets -type f \( -name "*.bin" -o -name "*.img" \) -exec cp {} artifacts/ \;
+          fi
+          if [ "$UPLOAD_BIN_DIR" = "true" ]; then
+            cp -r openwrt/bin artifacts/
+          fi
+      
+      # 上传到 Actions Artifacts
+      - name: Upload Artifacts
+        if: env.UPLOAD_FIRMWARE == 'true' || env.UPLOAD_BIN_DIR == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-firmware
+          path: artifacts/
+          
+      # 上传到 Releases
+      - name: Upload to Releases
+        if: env.UPLOAD_RELEASE == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/*
+          tag_name: "openwrt-build-${{ github.run_number }}"
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
