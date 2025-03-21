@@ -1,59 +1,47 @@
-#
-# 版权所有 (c) 2019-2021 P3TERX <https://p3terx.com>
-#
-# 这是一个开源软件，遵循 MIT 许可证。
-# 详情请参阅 /LICENSE。
-#
-# https://github.com/P3TERX/Actions-OpenWrt
-# 文件: .github/workflows/update-checker.yml
-# 描述: 源代码更新检查器
-#
+name: Update Checker # 工作流名称：更新检查器
 
-name: 更新检查器
+env: # 环境变量定义区域，用于在整个工作流中全局共享的值
+  REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-24.10 # 指定要监控的远程Git仓库的URL地址，当前值指向coolsnowwolf的lede仓库，用于git clone
+  REPO_BRANCH: 2410 # 指定要检查的仓库分支名称，当前值为主分支，用于指定克隆的分支
 
-env:
-  REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-24.10
-  REPO_BRANCH: openwrt-24.10
+on: # 触发条件
+  workflow_dispatch: # 允许手动触发工作流
+#  schedule: # 定时触发（已注释掉）
+#    - cron: 0 */18 * * * # 每18小时运行一次（如果取消注释）
 
-on:
-  workflow_dispatch:
-  # schedule:
-  #   - cron: 0 18 * * *
+jobs: # 任务定义
+  check: # 任务名称：检查
+    runs-on: ubuntu-latest # 运行环境：最新的Ubuntu系统
 
-jobs:
-  check:
-    runs-on: ubuntu-latest
+    steps: # 执行步骤
 
-    steps:
+    - name: Get Commit Hash # 步骤名称：获取提交哈希值
+      id: getHash # 步骤ID，用于后续引用
+      run: | # 执行的命令
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH . # 浅克隆仓库，仅获取最新提交，使用REPO_URL和REPO_BRANCH变量
+        echo "commitHash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT # 获取最新提交的哈希值并输出到GITHUB_OUTPUT供后续步骤使用
 
-    - name: 获取提交哈希值
-      id: getHash
-      run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH .
-        echo "commitHash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+    - name: Compare Commit Hash # 步骤名称：比较提交哈希值
+      id: cacheHash # 步骤ID，用于后续引用
+      uses: actions/cache@v3 # 使用缓存动作，版本3，用于检查是否已有相同的哈希值
+      with: # 参数
+        path: .commitHash # 缓存的文件路径，存储提交哈希值的文件
+        key: commitHash_${{ steps.getHash.outputs.commitHash }} # 缓存的键，基于提交哈希值生成，确保唯一性
 
-    - name: 比较提交哈希值
-      id: cacheHash
-      uses: actions/cache@v2
-      with:
-        path: .commitHash
-        key: HEAD-${{ steps.getHash.outputs.commitHash }}
+    - name: Save New Commit Hash # 步骤名称：保存新的提交哈希值
+      if: steps.cacheHash.outputs.cache-hit != 'true' # 条件：如果缓存未命中（即有新提交），才执行此步骤
+      run: | # 执行的命令
+        echo ${{ steps.getHash.outputs.commitHash }} | tee .commitHash # 保存新哈希值到文件，tee命令同时输出并写入
 
-    - name: 保存新的提交哈希值
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      run: |
-        echo ${{ steps.getHash.outputs.commitHash }} | tee .commitHash
+    - name: Trigger build # 步骤名称：触发构建
+      if: steps.cacheHash.outputs.cache-hit != 'true' # 条件：如果缓存未命中（即有新提交），才触发构建
+      uses: peter-evans/repository-dispatch@v2 # 使用repository-dispatch动作，版本2，用于发送事件
+      with: # 参数
+        token: ${{ github.token }} # 使用GitHub令牌，用于认证触发事件
+        event-type: Source Code Update # 触发的事件类型：源代码更新，通知其他工作流有新代码
 
-    - name: 触发构建
-      if: steps.cacheHash.outputs.cache-hit != 'true'
-      uses: peter-evans/repository-dispatch@v1
-      with:
-        token: ${{ secrets.ACTIONS_TRIGGER_PAT }}
-        repository: ccaicjoy/padavanonly/immortalwrt-mt798x-24.10
-        event-type: 源代码更新
-
-    - name: 删除工作流运行
-      uses: GitRML/delete-workflow-runs@main
-      with:
-        retain_days: 1
-        keep_minimum_runs: 1
+    - name: Delete workflow runs # 步骤名称：删除工作流运行记录
+      uses: Mattraks/delete-workflow-runs@v2 # 使用删除工作流动作，版本2，清理历史运行记录
+      with: # 参数
+        retain_days: 0 # 保留0天（立即删除），控制保留时间
+        keep_minimum_runs: 2 # 保留至少2次运行记录，确保保留最近的几次运行
