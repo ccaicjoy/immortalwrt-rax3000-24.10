@@ -1,18 +1,11 @@
-name: build-rax3000m-24.10.0
+# File path: .github/workflows/build-openwrt24.1.yml
+name: Build-RAX3000M-24.1
 
 on:
   workflow_dispatch:
     inputs:
-      profile:
-        type: choice
-        description: "请选择路由器型号"
-        required: true
-        options:
-          - cmcc_rax3000m-nand
-        default: cmcc_rax3000m-nand
       include_docker:
-        description: |
-          是否编译 Docker 插件
+        description: '包含Docker支持'
         required: true
         default: 'no'
         type: choice
@@ -20,106 +13,70 @@ on:
           - 'yes'
           - 'no'
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: ubuntu-22.04
+    container:
+      image: immortalwrt/imagebuilder:mediatek-mt798x-openwrt-24.10.0
+      options: --user root -v ${{ github.workspace }}/bin:/home/build/immortalwrt/bin
 
     steps:
-      - name: Checkout code
+      - name: 检出源码
         uses: actions/checkout@v3
         with:
           repository: padavanonly/immortalwrt-mt798x-24.10
+          ref: 2410
           submodules: recursive
+          path: openwrt
 
-      - name: Copy custom files
+      - name: 准备配置文件
         run: |
-          cp .config ${{ github.workspace }}
-          cp diy-part1.sh ${{ github.workspace }}
-          cp diy-part2.sh ${{ github.workspace }}
+          # 复制主配置文件
+          cp .config openwrt/
+          
+          # 复制自定义脚本
+          cp diy-part1.sh openwrt/
+          cp diy-part2.sh openwrt/
+          
+          # 设置执行权限
+          chmod +x openwrt/diy-part*.sh
 
-      - name: Set executable permissions
+      - name: 执行自定义步骤
         run: |
-          chmod +x diy-part1.sh
-          chmod +x diy-part2.sh
+          cd openwrt
+          ./diy-part1.sh
+          ./diy-part2.sh
 
-      - name: Get current router model name and set to environment variable
+      - name: 编译固件
         run: |
-          MODEL="RAX3000M-NAND"
-          echo "MODEL=$MODEL" >> $GITHUB_ENV
+          cd openwrt
+          echo "CONFIG_DOCKER_${{ github.event.inputs.include_docker == 'yes' && 'y' || 'n' }}" >> .config
+          make -j$(nproc) V=s
 
-      - name: Build RAX3000M ImmortalWrt 24.10.0
+      - name: 生成校验文件
         run: |
-          profiles="${{ github.event.inputs.profile }}"
-          include_docker="${{ github.event.inputs.include_docker }}"
+          cd openwrt/bin/targets/mediatek/mt798x
+          find . -name '*.bin' -exec sha256sum {} \; > checksums.sha256
+          mkdir -p ${{ github.workspace }}/artifacts
+          cp *.bin ${{ github.workspace }}/artifacts/
+          cp checksums.sha256 ${{ github.workspace }}/artifacts/
 
-          tag=mediatek-mt798x-openwrt-24.10.0
-          build_script="build-24.sh"
-          echo "platform=mediatek/mt798x" >> $GITHUB_ENV
-
-          docker run --rm -i \
-            --user root \
-            -v "${{ github.workspace }}/.config:/home/build/immortalwrt/.config" \
-            -v "${{ github.workspace }}/diy-part1.sh:/home/build/immortalwrt/diy-part1.sh" \
-            -v "${{ github.workspace }}/diy-part2.sh:/home/build/immortalwrt/diy-part2.sh" \
-            -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
-            -e PROFILE=$profile \
-            -e INCLUDE_DOCKER=$include_docker \
-            immortalwrt/imagebuilder:$tag /bin/bash -c "
-              ./diy-part1.sh && 
-              ./diy-part2.sh && 
-              make -j$(nproc)
-            "
-
-      - name: Generate Firmware SHA-256
-        run: |
-          tree ${{ github.workspace }}/bin/targets/${{ env.platform }}
-          cp -r ${{ github.workspace }}/bin/targets/${{ env.platform }}/*.bin ${{ github.workspace }}
-          for file in *.bin; do
-            sha256sum "$file" > "$file.sha256"
-            sha256sum -c "$file.sha256"
-          done
-
-      - name: Generate release informations
-        run: |
-          TIME="$(curl "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r .created_at)"
-
-          RELEASE_TAG="ImmortalWrt-24.10.0-RAX3000M-NAND-$(date -d "${TIME}" -u +'%Y-%m-%d')"
-          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
-
-          if [ "${{ github.event.inputs.include_docker}}" == "yes" ]; then
-            IS_DOCKER="是"
-          else
-            IS_DOCKER="否"
-          fi
-
-          cat <<EOF | sed -E 's/^  //' > Release.md
-            CI ImmortalWrt-24.10.0-RAX3000M-NAND $(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')
-
-            构建时间：\`$(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')\`
-            构建版本：ImmortalWrt-24.10.0
-            设备型号：RAX3000M NAND 版本
-            是否内置 Docker：$IS_DOCKER
-            登录后台：\`192.168.1.1\`
-            用户名：\`root\`
-            密码：无
-            U-Boot 刷机教程：https://www.right.com.cn/forum/thread-8356512-1-1.html
-          EOF
-
-          echo "RELEASE_NAME=$(head --line=1 Release.md)" >> $GITHUB_ENV
-          tail --line=+2 Release.md > Body.md
-
-      - name: Upload ImmortalWrt as release assets
-        uses: softprops/action-gh-release@v2.2.1
+      - name: 发布固件
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: ${{ env.RELEASE_NAME }}
-          body_path: ${{ github.workspace }}/Body.md
+          tag_name: 24.1-$(date +%Y%m%d)
+          name: RAX3000M-$(date +%Y%m%d)
+          body: |
+            ### 构建信息
+            设备型号: RAX3000M NAND 版
+            源码分支: 2410
+            编译时间: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+            Docker支持: ${{ github.event.inputs.include_docker == 'yes' && '是' || '否' }}
+            
+            ### 使用说明
+            后台地址: 192.168.1.1
+            用户名: root
+            密码: (空)
           files: |
-            ${{ github.workspace }}/*.bin
-            ${{ github.workspace }}/*.sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            artifacts/*.bin
+            artifacts/checksums.sha256
