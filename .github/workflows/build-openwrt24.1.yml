@@ -1,16 +1,15 @@
-name: build-cudy-24.10.0
+name: build-rax3000m-24.10.0
 
 on:
   workflow_dispatch:
     inputs:
       profile:
         type: choice
-        description: "请选择路由器型号"
+        description: "请选择 RAX3000M 固件类型"
         required: true
         options:
-          - cudy_tr3000-v1
-          - cudy_tr3000-v1-ubootmod
-        default: cudy_tr3000-v1
+          - rax3000m-nand
+        default: rax3000m-nand
       include_docker:
         description: |
           是否编译 Docker 插件
@@ -31,80 +30,59 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+        with:
+          repository: padavanonly/immortalwrt-mt798x-24.10
+          ref: main # Or the specific branch you want to use
 
-      - name: Set executable permissions
+      - name: Set environment variables
         run: |
-          chmod +x ${{ github.workspace }}/public/filogic/build-24.sh
-          chmod +x ${{ github.workspace }}/public/ramips/build-24.sh
-
-      - name: Get current router model name and set to environment variable
-        run: |
-          if [ "${{ github.event.inputs.profile }}" = "cudy_tr3000-v1" ]; then
-            MODEL="TR3000-V1"
-          elif [ "${{ github.event.inputs.profile }}" = "cudy_tr3000-v1-ubootmod" ]; then
-            MODEL="TR3000-V1-UbootMod"
-          else
-            echo "Error: Invalid profile selected!"
-            exit 1
-          fi
+          MODEL="RAX3000M"
           echo "MODEL=$MODEL" >> $GITHUB_ENV
+          echo "platform=mediatek/mt798x" >> $GITHUB_ENV # Adjust if the platform is different
+          echo "IMMORTALWRT_TAG=immortalwrt/imagebuilder:openwrt-24.10" >> $GITHUB_ENV # Using a generic tag for now
 
-      - name: Build Cudy ImmortalWrt 24.10.0
+      - name: Apply custom configuration and scripts
+        run: |
+          chmod +x .config
+          chmod +x diy-part1.sh
+          chmod +x diy-part2.sh
+          ./.config # Apply the .config file
+          if [ -f diy-part1.sh ]; then
+            ./diy-part1.sh
+          fi
+          if [ -f diy-part2.sh ]; then
+            ./diy-part2.sh
+          fi
+
+      - name: Build ImmortalWrt 24.10.0 for RAX3000M
         run: |
           profiles="${{ github.event.inputs.profile }}"
           include_docker="${{ github.event.inputs.include_docker }}"
 
-          if [ "$profiles" = "cudy_tr3000-v1" ]; then
-            tag=mediatek-filogic-openwrt-24.10.0
-            build_script="public/filogic/build-24.sh"
-            echo "platform=mediatek/filogic" >> $GITHUB_ENV
-          elif [ "$profiles" = "cudy_tr3000-v1-ubootmod" ]; then
-            tag=mediatek-filogic-openwrt-24.10.0
-            build_script="public/filogic/build-24.sh"
-            echo "platform=mediatek/filogic" >> $GITHUB_ENV
-          fi
-
-          IFS=',' read -r -a profile_array <<< "$profiles"
-
-          for profile in "${profile_array[@]}"; do
-            echo "Building for profile: $profile"
-
-            docker run --rm -i \
-              --user root \
-              -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
-              -v "${{ github.workspace }}/files/etc/uci-defaults:/home/build/immortalwrt/files/etc/uci-defaults" \
-              -v "${{ github.workspace }}/$build_script:/home/build/immortalwrt/build.sh" \
-              -e PROFILE=$profile \
-              -e INCLUDE_DOCKER=$include_docker \
-              immortalwrt/imagebuilder:$tag /bin/bash /home/build/immortalwrt/build.sh
-          done
+          docker run --rm -i \
+            --user root \
+            -v "${{ github.workspace }}:/home/build/immortalwrt" \
+            -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
+            -e PROFILE=$profiles \
+            -e INCLUDE_DOCKER=$include_docker \
+            ${{ env.IMMORTALWRT_TAG }} /bin/bash -c "cd /home/build/immortalwrt && ./scripts/feeds update -a && ./scripts/feeds install -a && make defconfig && make -j$(nproc) V=s"
 
       - name: Generate Firmware SHA-256
         run: |
-          tree ${{ github.workspace }}/bin/targets/${{ env.platform }}
-          cp -r ${{ github.workspace }}/bin/targets/${{ env.platform }}/*.bin ${{ github.workspace }}
-          for file in *.bin; do
+          mkdir -p firmware
+          find bin/targets/${{ env.platform }} -name "*.bin" -exec cp {} firmware \;
+          find bin/targets/${{ env.platform }} -name "*.trx" -exec cp {} firmware \; # Add other relevant firmware extensions
+          cd firmware
+          for file in *.bin *.trx; do
             sha256sum "$file" > "$file.sha256"
             sha256sum -c "$file.sha256"
           done
-          if [ "${{ github.event.inputs.profile }}" = "cudy_tr3000-v1-ubootmod" ]; then
-            cp -r ${{ github.workspace }}/bin/targets/${{ env.platform }}/*.fip ${{ github.workspace }}
-            cp -r ${{ github.workspace }}/bin/targets/${{ env.platform }}/*.itb ${{ github.workspace }}
-            for file in *.fip; do
-              sha256sum "$file" > "$file.sha256"
-              sha256sum -c "$file.sha256"
-            done
-            for file in *.itb; do
-              sha256sum "$file" > "$file.sha256"
-              sha256sum -c "$file.sha256"
-            done
-          fi
 
       - name: Generate release informations
         run: |
           TIME="$(curl "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r .created_at)"
 
-          RELEASE_TAG="ImmortalWrt-24.10.0-Cudy-${{ env.MODEL }}-$(date -d "${TIME}" -u +'%Y-%m-%d')"
+          RELEASE_TAG="ImmortalWrt-24.10.0-RAX3000M-NAND-$(date -d "${TIME}" -u +'%Y-%m-%d')"
           echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
 
           if [ "${{ github.event.inputs.include_docker }}" == "yes" ]; then
@@ -113,31 +91,29 @@ jobs:
             IS_DOCKER="否"
           fi
 
-          cat <<EOF | sed -E 's/^  //' > Release.md
-            CI ImmortalWrt-24.10.0-Cudy-${{ env.MODEL }} $(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')
+          cat <<EOF | sed -E 's/^ //' > Release.md
+            CI ImmortalWrt-24.10.0-RAX3000M-NAND $(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z (%:z)')
 
-            构建时间：\`$(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z(%:z)')\`
+            构建时间：'$(date -d "${TIME}" -u +'%Y-%m-%d %H:%M:%S %Z (%:z)')'
             构建版本：ImmortalWrt-24.10.0
-            是否内置 Docker ：$IS_DOCKER
-            登录后台：\`192.168.100.1\`
-            用户名：\`root\`
-            密码：无
+                            是否内置 Docker ：$IS_DOCKER
+                            登录后台：\`192.168.1.1\` # Default OpenWrt IP
+                            用户名：\`root\`
+                            密码：无
           EOF
 
           echo "RELEASE_NAME=$(head --line=1 Release.md)" >> $GITHUB_ENV
           tail --line=+2 Release.md > Body.md
 
-      - name: Upload ImmortalWrt as release assets
+      - name: Upload ImmortalWrt as release asset
         uses: softprops/action-gh-release@v2.2.1
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_NAME }}
           body_path: ${{ github.workspace }}/Body.md
           files: |
-            ${{ github.workspace }}/*.fip
-            ${{ github.workspace }}/*.itb
-            ${{ github.workspace }}/*.bin
-            ${{ github.workspace }}/*.sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+            firmware/*.bin
+            firmware/*.trx
+            firmware/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
